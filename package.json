@@ -1,11 +1,19 @@
 {
   "name": "collab-db",
   "private": true,
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "npm run dev -w apps/web",
+    "dev:server": "npm run dev -w apps/server",
+    "dev:web": "npm run dev -w apps/web",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "migrate": "npm run migrate -w apps/server",
     "build": "npm run build -w apps/web",
-    "test": "npm run test -w apps/web",
-    "typecheck": "npm run typecheck -w apps/web"
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
   }
 }

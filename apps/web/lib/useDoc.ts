@@ -3,35 +3,79 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import * as Y from "yjs";
 import { IndexeddbPersistence } from "y-indexeddb";
+import { SyncProvider, type SyncState } from "@collab/sync";
 import { attachTabSync } from "./tabSync";
 import { CellValue, ColumnInfo, RowInfo, getCellValue, listColumns, listRows, rowsMap, seedIfEmpty } from "./doc";
 
 export type DocStatus = "loading" | "ready";
 
-/** Creates the Y.Doc, persists it to IndexedDB, mirrors it across tabs. */
-export function useDoc(name: string) {
-  const [state, setState] = useState<{ doc: Y.Doc; status: DocStatus } | null>(null);
+export interface SyncOptions {
+  url: string;
+  docId: string;
+  getToken: () => Promise<string>;
+}
+
+/**
+ * Creates the Y.Doc, persists it to IndexedDB, mirrors it across tabs and, when `sync` is given,
+ * connects it to the server. Pass name = null to do nothing yet (e.g. while the session loads).
+ */
+export function useDoc(name: string | null, sync: SyncOptions | null = null) {
+  const [state, setState] = useState<{ doc: Y.Doc; status: DocStatus; provider: SyncProvider | null } | null>(null);
+  const syncRef = useRef(sync);
+  syncRef.current = sync;
+  const syncKey = sync ? `${sync.url}|${sync.docId}` : "";
 
   useEffect(() => {
+    if (name === null) return;
     const doc = new Y.Doc();
     const idb = new IndexeddbPersistence(`collab-db:${name}`, doc);
     const detach = attachTabSync(doc, name);
+    let provider: SyncProvider | null = null;
+    let unsubscribe = () => {};
     let alive = true;
-    setState({ doc, status: "loading" });
+    setState({ doc, status: "loading", provider: null });
+
     idb.whenSynced.then(() => {
       if (!alive) return;
-      seedIfEmpty(doc);
-      setState({ doc, status: "ready" });
+      const opts = syncRef.current;
+      if (opts) {
+        provider = new SyncProvider(doc, { url: opts.url, docId: opts.docId, getToken: opts.getToken });
+        // A brand-new document is empty on the server. Its owner seeds the starter table once,
+        // AFTER the first sync, so we never seed on top of data that is still on its way.
+        let tried = false;
+        const p = provider;
+        unsubscribe = p.subscribe(() => {
+          const s = p.getState();
+          if (!tried && s.status === "synced" && s.role === "owner") {
+            tried = true;
+            seedIfEmpty(doc);
+          }
+        });
+      } else {
+        seedIfEmpty(doc);
+      }
+      setState({ doc, status: "ready", provider });
     });
+
     return () => {
       alive = false;
+      unsubscribe();
+      provider?.destroy();
       detach();
       idb.destroy();
       doc.destroy();
     };
-  }, [name]);
+  }, [name, syncKey]);
 
   return state;
+}
+
+const NO_SUBSCRIBE = () => () => {};
+const NO_STATE = () => null;
+
+/** Live connection state of a SyncProvider (null when the doc is local-only). */
+export function useSyncState(provider: SyncProvider | null): SyncState | null {
+  return useSyncExternalStore(provider ? provider.subscribe : NO_SUBSCRIBE, provider ? provider.getState : NO_STATE, NO_STATE);
 }
 
 /**

@@ -8,21 +8,24 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tanstack/react-table": "^8.21.3",
-    "@tanstack/react-virtual": "^3.14.26",
-    "fractional-indexing": "^3.4.0",
-    "nanoid": "^5.1.16",
-    "next": "^14.2.35",
+    "@tanstack/react-table": "^8.20.5",
+    "@tanstack/react-virtual": "^3.10.8",
+    "fractional-indexing": "^3.2.0",
+    "nanoid": "^5.0.7",
+    "next": "^14.2.15",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "y-indexeddb": "^9.0.12",
-    "yjs": "^13.6.33"
+    "yjs": "^13.6.20",
+    "@collab/shared": "*",
+    "@collab/sync": "*",
+    "next-auth": "^4.24.8"
   },
   "devDependencies": {
-    "@types/node": "^22.20.5",
-    "@types/react": "^18.3.31",
-    "@types/react-dom": "^18.3.7",
-    "typescript": "^5.9.3",
-    "vitest": "^2.1.9"
+    "@types/node": "^22.7.0",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.2"
   }
 }

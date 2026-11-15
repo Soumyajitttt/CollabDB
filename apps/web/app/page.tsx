@@ -1,5 +1,5 @@
-import { Workspace } from "@/components/Workspace";
+import { DocList } from "@/components/DocList";
 
 export default function Page() {
-  return <Workspace />;
+  return <DocList />;
 }

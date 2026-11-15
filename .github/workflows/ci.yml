@@ -3,6 +3,16 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: collab, POSTGRES_PASSWORD: collab, POSTGRES_DB: collabdb }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U collab -d collabdb" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgres://collab:collab@localhost:5432/collabdb
+      REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
