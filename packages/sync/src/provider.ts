@@ -1,7 +1,9 @@
 import * as Y from "yjs";
 import { io, Socket } from "socket.io-client";
+import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate, removeAwarenessStates } from "y-protocols/awareness";
 import {
-  EV, DocErrorPayload, DocJoinedPayload, Role, ServerUpdatePayload, SyncAckPayload, SyncRequestPayload, SyncStep2Payload,
+  EV, AwarenessPayload, AwarenessState, DocErrorPayload, DocJoinedPayload, DocRolePayload, PresenceUser, Role,
+  ServerUpdatePayload, SyncAckPayload, SyncRequestPayload, SyncStep2Payload,
 } from "@collab/shared";
 
 export type SyncStatus = "connecting" | "syncing" | "synced" | "offline";
@@ -9,10 +11,15 @@ export type SyncStatus = "connecting" | "syncing" | "synced" | "offline";
 export interface SyncState {
   status: SyncStatus;
   role: Role | null;
+  /** Who the server says you are (name and colour are decided server-side). */
+  me: PresenceUser | null;
   /** Updates sent (or waiting to be sent) that the server has not acknowledged yet. */
   pending: number;
   lastError: DocErrorPayload | null;
 }
+
+/** Another participant, as seen through the server. */
+export type PresenceEntry = AwarenessState & { clientId: number };
 
 export interface SyncProviderOptions {
   url: string;
@@ -45,8 +52,15 @@ export class SyncProvider {
   readonly doc: Y.Doc;
   private opts: Required<SyncProviderOptions>;
   private socket: Socket;
-  private state: SyncState = { status: "connecting", role: null, pending: 0, lastError: null };
+  private state: SyncState = { status: "connecting", role: null, me: null, pending: 0, lastError: null };
   private listeners = new Set<() => void>();
+
+  /** Live cursors. Not persisted anywhere. */
+  readonly awareness: Awareness;
+  private presence: PresenceEntry[] = [];
+  private presenceListeners = new Set<() => void>();
+  private presenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingPresence: { cell: { rowId: string; colId: string } | null; editing: boolean } | null = null;
 
   private gotStep2 = false;
   private gotRequest = false;
@@ -75,8 +89,55 @@ export class SyncProvider {
       },
     });
     doc.on("update", this.onLocalUpdate);
+    this.awareness = new Awareness(doc);
+    this.awareness.setLocalState({ cell: null, editing: false });
+    this.awareness.on("update", this.onAwarenessUpdate);
+    this.awareness.on("change", this.refreshPresence);
     this.wire();
   }
+
+  // ---- presence ----
+  subscribePresence = (fn: () => void) => {
+    this.presenceListeners.add(fn);
+    return () => { this.presenceListeners.delete(fn); };
+  };
+  getPresence = () => this.presence;
+
+  private refreshPresence = () => {
+    const out: PresenceEntry[] = [];
+    this.awareness.getStates().forEach((st, clientId) => {
+      const s = st as Partial<AwarenessState>;
+      if (clientId !== this.awareness.clientID && s.user) out.push({ clientId, user: s.user, cell: s.cell ?? null, editing: !!s.editing });
+    });
+    this.presence = out;
+    this.presenceListeners.forEach((l) => l());
+  };
+
+  /** Tell others which cell you are on. Throttled to one update per 50 ms (roadmap). */
+  setPresence(cell: { rowId: string; colId: string } | null, editing: boolean) {
+    this.pendingPresence = { cell, editing };
+    if (this.presenceTimer) return;
+    this.presenceTimer = setTimeout(() => {
+      this.presenceTimer = null;
+      const next = this.pendingPresence;
+      this.pendingPresence = null;
+      if (!next) return;
+      const cur = this.awareness.getLocalState() as { cell?: { rowId: string; colId: string } | null; editing?: boolean } | null;
+      const same = cur && cur.editing === next.editing && cur.cell?.rowId === next.cell?.rowId && cur.cell?.colId === next.cell?.colId;
+      if (!same) this.awareness.setLocalState(next);
+    }, 50);
+  }
+
+  private onAwarenessUpdate = (
+    { added, updated, removed }: { added: number[]; updated: number[]; removed: number[] },
+    origin: unknown,
+  ) => {
+    if (origin !== "local" || this.state.status !== "synced") return;
+    this.socket.emit(EV.AWARENESS, {
+      docId: this.opts.docId,
+      update: encodeAwarenessUpdate(this.awareness, [...added, ...updated, ...removed]),
+    });
+  };
 
   // ---- state (works with React's useSyncExternalStore) ----
   subscribe = (fn: () => void) => {
@@ -104,7 +165,7 @@ export class SyncProvider {
 
     s.on(EV.DOC_JOINED, (p: DocJoinedPayload) => {
       this.rejoinCount = 0;
-      this.set({ role: p.role, lastError: null });
+      this.set({ role: p.role, me: p.user, lastError: null });
       s.emit(EV.SYNC_STEP1, { docId: this.opts.docId, stateVector: Y.encodeStateVector(this.doc) });
     });
 
@@ -122,6 +183,19 @@ export class SyncProvider {
     });
 
     s.on(EV.SYNC_UPDATE, (p: ServerUpdatePayload) => Y.applyUpdate(this.doc, toU8(p.update), this));
+
+    s.on(EV.DOC_ROLE, (p: DocRolePayload) => {
+      this.set({ role: p.role });
+      if (p.role === "viewer") {
+        // A viewer must not send anything; drop whatever was waiting.
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = null;
+        this.buffer = [];
+        this.refreshPending();
+      }
+    });
+
+    s.on(EV.AWARENESS, (p: AwarenessPayload) => applyAwarenessUpdate(this.awareness, toU8(p.update), "server"));
 
     s.on(EV.SYNC_ACK, (p: SyncAckPayload) => {
       this.unacked.delete(p.clientSeq);
@@ -180,11 +254,19 @@ export class SyncProvider {
     this.timer = null;
     this.buffer = [];
     this.unacked.clear(); // acks for these will never arrive; the next handshake re-sends what's missing
+    // Nobody is "here" while we are cut off: clear remote cursors instead of leaving stale ones.
+    const others = [...this.awareness.getStates().keys()].filter((id) => id !== this.awareness.clientID);
+    if (others.length > 0) removeAwarenessStates(this.awareness, others, "offline");
     this.set({ status: "offline", pending: 0 });
   }
 
   private maybeSynced() {
-    if (this.gotStep2 && this.gotRequest && this.state.status !== "synced") this.set({ status: "synced" });
+    if (this.gotStep2 && this.gotRequest && this.state.status !== "synced") {
+      this.set({ status: "synced" });
+      // The server forgot us when we disconnected; announce ourselves again.
+      const mine = this.awareness.getLocalState();
+      if (mine) this.awareness.setLocalState({ ...mine });
+    }
   }
 
   // ---- sending ----
@@ -237,6 +319,8 @@ export class SyncProvider {
   }
 
   destroy() {
+    if (this.presenceTimer) clearTimeout(this.presenceTimer);
+    this.awareness.destroy(); // announces "I left" if still connected
     this.destroyed = true;
     this.doc.off("update", this.onLocalUpdate);
     this.clearRejoin();

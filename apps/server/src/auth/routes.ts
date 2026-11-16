@@ -2,7 +2,8 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import type { Pool } from "pg";
 import { ZodError } from "zod";
 import {
-  CreateDocBody, DocSummary, LoginBody, PublicUser, RegisterBody, verifyAccessToken,
+  AddMemberBody, CreateDocBody, DocIdParam, DocSummary, LoginBody, MemberInfo, PublicUser, RegisterBody,
+  UpdateMemberBody, verifyAccessToken,
 } from "@collab/shared";
 import type { Config } from "../config";
 import { RateLimiter } from "../rateLimiter";
@@ -73,9 +74,19 @@ export function requireAuth(config: Config) {
   };
 }
 
-export function docsRouter(pool: Pool, config: Config): Router {
+type Role = "owner" | "editor" | "viewer";
+
+export function docsRouter(
+  pool: Pool,
+  config: Config,
+  /** Called after any membership change so connected sockets pick up the new role at once. */
+  onMembershipChanged: (docId: string, userId: string) => Promise<void> = async () => {},
+): Router {
   const r = Router();
   r.use(requireAuth(config));
+
+  const roleOf = async (docId: string, userId: string): Promise<Role | null> =>
+    (await pool.query<{ role: Role }>("SELECT role FROM document_members WHERE doc_id = $1 AND user_id = $2", [docId, userId])).rows[0]?.role ?? null;
 
   r.get("/", wrap(async (req, res) => {
     const { rows } = await pool.query(
@@ -107,6 +118,71 @@ export function docsRouter(pool: Pool, config: Config): Router {
     } finally {
       client.release();
     }
+  }));
+
+  // ---- sharing ----
+  // Non-members get 404 (not 403) so the existence of a document is not revealed.
+
+  r.get("/:id/members", wrap(async (req, res) => {
+    const docId = DocIdParam.parse(req.params.id);
+    if (!(await roleOf(docId, req.userId!))) return void res.status(404).json({ error: "NOT_FOUND" });
+    const { rows } = await pool.query<MemberInfo>(
+      `SELECT u.id AS "userId", u.email, u.name, m.role
+         FROM document_members m JOIN users u ON u.id = m.user_id
+        WHERE m.doc_id = $1
+        ORDER BY (m.role = 'owner') DESC, u.name`,
+      [docId],
+    );
+    res.json({ members: rows });
+  }));
+
+  r.post("/:id/members", wrap(async (req, res) => {
+    const docId = DocIdParam.parse(req.params.id);
+    const me = await roleOf(docId, req.userId!);
+    if (!me) return void res.status(404).json({ error: "NOT_FOUND" });
+    if (me !== "owner") return void res.status(403).json({ error: "FORBIDDEN" });
+    const body = AddMemberBody.parse(req.body);
+    const u = await pool.query<{ id: string; name: string; email: string }>("SELECT id, name, email FROM users WHERE email = $1", [body.email]);
+    const target = u.rows[0];
+    if (!target) return void res.status(404).json({ error: "USER_NOT_FOUND" });
+    if ((await roleOf(docId, target.id)) === "owner") return void res.status(409).json({ error: "ALREADY_OWNER" });
+    await pool.query(
+      `INSERT INTO document_members (doc_id, user_id, role) VALUES ($1, $2, $3)
+       ON CONFLICT (doc_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
+      [docId, target.id, body.role],
+    );
+    await onMembershipChanged(docId, target.id);
+    res.status(201).json({ member: { userId: target.id, email: target.email, name: target.name, role: body.role } satisfies MemberInfo });
+  }));
+
+  r.patch("/:id/members/:userId", wrap(async (req, res) => {
+    const docId = DocIdParam.parse(req.params.id);
+    const targetId = DocIdParam.parse(req.params.userId);
+    const me = await roleOf(docId, req.userId!);
+    if (!me) return void res.status(404).json({ error: "NOT_FOUND" });
+    if (me !== "owner") return void res.status(403).json({ error: "FORBIDDEN" });
+    const { role } = UpdateMemberBody.parse(req.body);
+    const current = await roleOf(docId, targetId);
+    if (!current) return void res.status(404).json({ error: "NOT_FOUND" });
+    if (current === "owner") return void res.status(409).json({ error: "CANNOT_CHANGE_OWNER" });
+    await pool.query("UPDATE document_members SET role = $3 WHERE doc_id = $1 AND user_id = $2", [docId, targetId, role]);
+    await onMembershipChanged(docId, targetId);
+    res.json({ ok: true });
+  }));
+
+  r.delete("/:id/members/:userId", wrap(async (req, res) => {
+    const docId = DocIdParam.parse(req.params.id);
+    const targetId = DocIdParam.parse(req.params.userId);
+    const me = await roleOf(docId, req.userId!);
+    if (!me) return void res.status(404).json({ error: "NOT_FOUND" });
+    // The owner can remove anyone; everyone else can only remove themselves (leave).
+    if (me !== "owner" && targetId !== req.userId) return void res.status(403).json({ error: "FORBIDDEN" });
+    const current = await roleOf(docId, targetId);
+    if (!current) return void res.status(404).json({ error: "NOT_FOUND" });
+    if (current === "owner") return void res.status(409).json({ error: "CANNOT_REMOVE_OWNER" });
+    await pool.query("DELETE FROM document_members WHERE doc_id = $1 AND user_id = $2", [docId, targetId]);
+    await onMembershipChanged(docId, targetId);
+    res.json({ ok: true });
   }));
 
   return r;

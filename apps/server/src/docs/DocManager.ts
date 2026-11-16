@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { Awareness } from "y-protocols/awareness";
 import type { Pool } from "pg";
 
 export interface DocManagerOptions {
@@ -6,6 +7,10 @@ export interface DocManagerOptions {
   evictAfterMs: number;
   /** Delay before retrying a failed write (default 1000). */
   retryMs?: number;
+  /** Compact after this many rows in `updates` (default 500). */
+  compactEvery?: number;
+  /** ... or after this long if there is anything to fold (default 5 min). */
+  compactIntervalMs?: number;
   log?: (msg: string) => void;
 }
 
@@ -20,6 +25,14 @@ interface Batch {
 /** One active document: the live Y.Doc plus everything needed to persist it. */
 export class ManagedDoc {
   readonly doc = new Y.Doc();
+  /** Live cursors / who is here. Never persisted. */
+  readonly awareness: Awareness;
+  /** Which socket (and user) owns each awareness client id, so nobody can speak for someone else. */
+  awarenessOwners = new Map<number, { socketId: string; userId: string }>();
+  awarenessWired = false;
+  /** Rows in `updates` since the last snapshot. */
+  rowsSinceSnapshot = 0;
+  lastCompactAt = Date.now();
   clients = 0;
   seq = 0; // last seq written (or loaded)
   batch: Batch | null = null;
@@ -30,7 +43,10 @@ export class ManagedDoc {
   /** Batches whose INSERT failed; retried before newer ones so seq order is kept. */
   failed: Batch[] = [];
 
-  constructor(readonly id: string) {}
+  constructor(readonly id: string) {
+    this.awareness = new Awareness(this.doc);
+    this.awareness.setLocalState(null); // the server itself is not a participant
+  }
 
   get hasPendingWrites() {
     return this.batch !== null || this.failed.length > 0;
@@ -47,7 +63,17 @@ export class DocManager {
   private docs = new Map<string, ManagedDoc>();
   private loading = new Map<string, Promise<ManagedDoc>>();
 
-  constructor(private pool: Pool, private opts: DocManagerOptions) {}
+  private compactTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(private pool: Pool, private opts: DocManagerOptions) {
+    const every = opts.compactIntervalMs ?? 5 * 60_000;
+    this.compactTimer = setInterval(() => {
+      for (const md of this.docs.values()) {
+        if (md.rowsSinceSnapshot > 0 && Date.now() - md.lastCompactAt >= every) void this.compact(md);
+      }
+    }, Math.max(50, Math.min(every / 2, 30_000)));
+    this.compactTimer.unref();
+  }
 
   get activeDocs() {
     return this.docs.size;
@@ -100,6 +126,7 @@ export class DocManager {
         md.seq = Number(r.seq);
       }
     });
+    md.rowsSinceSnapshot = ups.rows.length;
     this.docs.set(docId, md);
     return md;
   }
@@ -140,8 +167,47 @@ export class DocManager {
   flush(md: ManagedDoc): Promise<void> {
     if (md.flushTimer) clearTimeout(md.flushTimer);
     md.flushTimer = null;
-    md.chain = md.chain.then(() => this.writePending(md));
+    md.chain = md.chain.then(() => this.writePending(md)).then(() => this.maybeCompact(md));
     return md.chain;
+  }
+
+  private async maybeCompact(md: ManagedDoc) {
+    if (md.rowsSinceSnapshot >= (this.opts.compactEvery ?? 500)) await this.compactNow(md);
+  }
+
+  /** Fold every row of `updates` into one snapshot. Safe to call any time; runs in the doc's write queue. */
+  compact(md: ManagedDoc): Promise<void> {
+    md.chain = md.chain.then(() => this.writePending(md)).then(() => this.compactNow(md));
+    return md.chain;
+  }
+
+  /**
+   * Roadmap section 6: snapshot = encodeStateAsUpdate, then drop the rows it covers, in ONE
+   * transaction guarded by an advisory lock so two processes never compact the same doc together.
+   * Assumes one process owns a document at a time (as the rest of the server does).
+   */
+  private async compactNow(md: ManagedDoc) {
+    if (md.rowsSinceSnapshot === 0 || md.batch || md.failed.length > 0) return; // nothing to fold, or not all persisted yet
+    const upTo = md.seq;
+    // May include edits that are applied in memory but not written yet. That is harmless: they get a
+    // higher seq and are re-applied on load, and applying an update twice changes nothing.
+    const state = Y.encodeStateAsUpdate(md.doc);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [md.id]);
+      await client.query("INSERT INTO snapshots (doc_id, state, up_to_seq, is_auto) VALUES ($1, $2, $3, true)", [md.id, Buffer.from(state), upTo]);
+      await client.query("DELETE FROM updates WHERE doc_id = $1 AND seq <= $2", [md.id, upTo]);
+      await client.query("DELETE FROM snapshots WHERE doc_id = $1 AND is_auto AND up_to_seq < $2", [md.id, upTo]); // keep manual versions (Week 4)
+      await client.query("COMMIT");
+      md.rowsSinceSnapshot = 0;
+      md.lastCompactAt = Date.now();
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => {});
+      this.opts.log?.(`compaction failed for ${md.id}: ${(e as Error).message}`);
+    } finally {
+      client.release();
+    }
   }
 
   private async writePending(md: ManagedDoc) {
@@ -165,6 +231,7 @@ export class DocManager {
         return; // stays in md.failed, retried in order
       }
       md.failed.shift();
+      md.rowsSinceSnapshot++;
       b.acks.forEach((a) => a());
     }
   }
@@ -198,7 +265,10 @@ export class DocManager {
       await this.flush(md);
       if (md.clients > 0) return;
       if (md.hasPendingWrites) return this.scheduleEvict(md); // DB trouble: keep it in memory
+      if (md.rowsSinceSnapshot > 0) await this.compact(md); // leave the doc cheap to load next time
+      if (md.clients > 0) return;
       if (md.retryTimer) clearTimeout(md.retryTimer);
+      md.awareness.destroy();
       md.doc.destroy();
       this.docs.delete(md.id);
     }, this.opts.evictAfterMs);
@@ -206,7 +276,9 @@ export class DocManager {
 
   /** Flush everything and stop timers (graceful shutdown). */
   async shutdown() {
+    if (this.compactTimer) clearInterval(this.compactTimer);
     for (const md of this.docs.values()) {
+      md.awareness.destroy();
       if (md.evictTimer) clearTimeout(md.evictTimer);
       if (md.retryTimer) clearTimeout(md.retryTimer);
       await this.flush(md);

@@ -12,6 +12,11 @@ interface Props {
   active: boolean;
   editing: boolean;
   seed: string | null; // first typed character when editing starts by typing
+  readOnly?: boolean;
+  /** Someone else is on this cell. Primitives, so React.memo only re-renders cells that really change. */
+  remoteName?: string;
+  remoteColor?: string;
+  remoteEditing?: boolean;
   onSelect: () => void;
   onStartEdit: () => void;
   onEnd: (move: "down" | "right" | "left" | "none") => void;
@@ -22,32 +27,43 @@ function display(col: ColumnInfo, v: CellValue) {
   return String(v);
 }
 
-export const Cell = memo(function Cell({ doc, rowId, col, active, editing, seed, onSelect, onStartEdit, onEnd }: Props) {
+export const Cell = memo(function Cell({
+  doc, rowId, col, active, editing, seed, readOnly, remoteName, remoteColor, remoteEditing, onSelect, onStartEdit, onEnd,
+}: Props) {
   const value = useCell(doc, rowId, col.id);
-  const cls = `cell${active ? " is-active" : ""}${col.type === "number" ? " is-num" : ""}`;
+  const cls = `cell${active ? " is-active" : ""}${col.type === "number" ? " is-num" : ""}${remoteColor ? " has-remote" : ""}`;
+  const ring = remoteColor && !active ? { boxShadow: `inset 0 0 0 2px ${remoteColor}` } : undefined;
+  const tag = remoteName ? (
+    <span className="rtag" style={{ background: remoteColor }} title={`${remoteName}${remoteEditing ? " is editing" : ""}`}>
+      {remoteEditing ? "✎ " : ""}{remoteName}
+    </span>
+  ) : null;
 
   if (col.type === "checkbox") {
     return (
-      <div className={cls} role="gridcell" onMouseDown={onSelect}>
+      <div className={cls} style={ring} role="gridcell" onMouseDown={onSelect}>
         <input
           type="checkbox"
           className="check"
           checked={value === true}
+          disabled={readOnly}
           aria-label={col.name}
           onChange={(e) => setCell(doc, rowId, col.id, e.target.checked)}
           tabIndex={-1}
         />
+        {tag}
       </div>
     );
   }
 
   return (
-    <div className={cls} role="gridcell" onMouseDown={onSelect} onDoubleClick={onStartEdit}>
-      {editing ? (
+    <div className={cls} style={ring} role="gridcell" onMouseDown={onSelect} onDoubleClick={readOnly ? undefined : onStartEdit}>
+      {editing && !readOnly ? (
         <Editor doc={doc} rowId={rowId} col={col} value={value} seed={seed} onEnd={onEnd} />
       ) : (
         <span className={col.type === "longtext" ? "clip" : undefined}>{display(col, value)}</span>
       )}
+      {tag}
     </div>
   );
 });

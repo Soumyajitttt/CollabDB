@@ -59,3 +59,37 @@ The ack number includes the deliberate 20 ms batching window. Localhost has no n
 **Fix after first run: join retry.** Reloading the page while the server's database was unreachable (for example no internet with a hosted Postgres)
 made the server answer `doc:join` with `INTERNAL`, and the client sat in "Syncing…" forever. Reproduced with a test that makes the first two membership lookups fail;
 `SyncProvider` now re-sends `doc:join` with backoff when it gets `INTERNAL` before the handshake finishes. Edits were never lost, they only synced late.
+
+---
+
+## Week 3: Presence, snapshots + compaction, permissions
+
+**Built**
+- **Presence.** `y-protocols` awareness relayed by the server, never stored. Clients send only `{cell, editing}`; the server stamps the real name and a palette colour, rejects forged identities and other people's client ids, and cleans up on disconnect or removal. UI: coloured cell ring + name tag (with a pencil while editing), avatars in the header, remote cursors cleared while offline.
+- **Snapshots + compaction.** One transaction under an advisory lock: write the snapshot, delete the folded rows, keep manual versions. Triggered by 500 rows, a 5-minute timer, or the last client leaving.
+- **Permissions.** Share dialog (owner only) with add / change role / remove; members REST with owner-only rules; role changes and removals reach already-connected sockets (`doc:role`, `FORBIDDEN`). Viewers get a read-only grid; a `READ_ONLY` error makes the web client re-sync from the server.
+- **Fix requested after Week 2:** the whole table card on the list page is now the link (keyboard focus, hover state, "Opening…" while navigating), plus a `loading.tsx` for `/doc/[id]`.
+
+**Measured (my sandbox, local Postgres 16; re-run on yours: `npm run bench:compaction -w apps/server`)**
+
+| 50,000-update session | before compaction | after |
+|---|---|---|
+| rows in `updates` | 50,000 | 0 (1 snapshot) |
+| payload bytes stored | 1,542 KiB | 530 KiB |
+| time for a fresh server to load the doc (median of 3) | 332 to 370 ms | 116 to 140 ms |
+| compaction itself | | 113 to 153 ms |
+
+Payload bytes only: per-row overhead and indexes on 50,000 rows make the real on-disk difference larger. The first version of this benchmark was wrong (its own measuring managers compacted on shutdown, so "before" was really "after"); I caught it from a suspicious "0 ms" and fixed it.
+
+**Tests.** 80 passing: shared 6, server 60, web 14. New: awareness wire format and sanitising, presence end to end (identity from the server, late joiner, leave, offline clearing, throttling, viewer presence, forged client id, oversized and malformed updates), sharing rules and live role changes (promote, demote, remove, leave), compaction (state equality after fold, snapshot + tail, newest-only snapshot, manual snapshots kept, automatic trigger, compaction on eviction, advisory lock actually blocks, end to end on the real server). The full-stack smoke script now also covers sharing, role change and presence through real NextAuth sessions.
+
+**Decisions**
+- The server, not the client, decides name and colour: otherwise any user could show up as someone else.
+- Inviting needs an existing account (404 `USER_NOT_FOUND`); pending invites for unregistered emails are not built.
+- Compaction runs inside the document's write queue and skips itself while any write is unpersisted.
+
+**Known limits**
+- UI is verified by typecheck, a production build and route checks, not by clicking through it in a browser (no browser in my sandbox): cursors, the share dialog, read-only grid and the clickable card need a look from you.
+- Compaction assumes one process owns a document. Redis fan-out (optional stretch) would need doc ownership first.
+- A token is still verified only at connect time.
+- Version history UI, per-user undo, activity feed: Week 4.

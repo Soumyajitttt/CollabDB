@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { MAX_STATE_VECTOR_BYTES, MAX_UPDATE_BYTES, ROLES } from "./constants";
+import { MAX_AWARENESS_BYTES, MAX_STATE_VECTOR_BYTES, MAX_UPDATE_BYTES, ROLES } from "./constants";
 
 /** Event names (see docs/protocol.md). */
 export const EV = {
@@ -11,6 +11,8 @@ export const EV = {
   SYNC_REQUEST: "sync:request",
   SYNC_UPDATE: "sync:update",
   SYNC_ACK: "sync:ack",
+  DOC_ROLE: "doc:role",
+  AWARENESS: "awareness:update",
 } as const;
 
 export const ErrorCode = z.enum([
@@ -31,12 +33,34 @@ export const SyncUpdate = z.object({
   clientSeq: z.number().int().nonnegative(),
 });
 
+export const AwarenessMsg = z.object({ docId: z.string().uuid(), update: bytes(MAX_AWARENESS_BYTES) });
+
+/**
+ * What a client may publish about itself. The server adds {user: {id, name, color}} itself,
+ * so nobody can pretend to be someone else or pick their own CSS.
+ */
+export const AwarenessInput = z
+  .object({
+    cell: z.object({ rowId: z.string().max(64), colId: z.string().max(64) }).nullable(),
+    editing: z.boolean(),
+  })
+  .strict()
+  .nullable(); // null = "I left"
+
 export type JoinDocPayload = z.infer<typeof JoinDoc>;
 export type SyncStep1Payload = z.infer<typeof SyncStep1>;
 export type SyncUpdatePayload = z.infer<typeof SyncUpdate>;
 
 /** Server -> client shapes (plain TS types, the client trusts its own server). */
-export interface DocJoinedPayload { docId: string; role: Role }
+export interface PresenceUser { id: string; name: string; color: string }
+export interface DocJoinedPayload { docId: string; role: Role; user: PresenceUser }
+export interface DocRolePayload { docId: string; role: Role }
+export interface AwarenessPayload { docId: string; update: Uint8Array }
+export interface AwarenessState {
+  user: PresenceUser;
+  cell: { rowId: string; colId: string } | null;
+  editing: boolean;
+}
 export interface DocErrorPayload { code: ErrorCode; message?: string }
 export interface SyncStep2Payload { docId: string; update: Uint8Array }
 export interface SyncRequestPayload { docId: string; stateVector: Uint8Array }

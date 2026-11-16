@@ -3,6 +3,8 @@ import * as Y from "yjs";
 import { SyncProvider, type SyncProviderOptions } from "@collab/sync";
 import { signAccessToken } from "@collab/shared";
 import { randomUUID } from "node:crypto";
+import { io as ioClient } from "socket.io-client";
+import { EV } from "@collab/shared";
 import { loadConfig, type Config } from "../src/config";
 import { startServer, type RunningServer } from "../src/server";
 
@@ -35,12 +37,13 @@ export const start = (over: Record<string, string> = {}): Promise<RunningServer>
 export const uniqueEmail = () => `u-${randomUUID()}@test.dev`;
 
 export async function createUser(server: RunningServer, name = "Tester") {
+  const email = uniqueEmail();
   const { rows } = await server.pool.query(
     "INSERT INTO users (email, password_hash, name) VALUES ($1, 'x', $2) RETURNING id",
-    [uniqueEmail(), name],
+    [email, name],
   );
   const id = rows[0].id as string;
-  return { id, token: await signAccessToken(SECRET, { sub: id }) };
+  return { id, email, name, token: await signAccessToken(SECRET, { sub: id }) };
 }
 
 export async function createDoc(server: RunningServer, ownerId: string, members: [string, "editor" | "viewer"][] = []) {
@@ -90,4 +93,16 @@ export function mulberry32(seed: number) {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** A bare socket that joins a doc and records every doc:error, for testing the server without our client in the way. */
+export async function rawJoin(server: RunningServer, token: string, docId: string) {
+  const socket = ioClient(server.url, { transports: ["websocket"], auth: { token }, reconnection: false });
+  const errors: string[] = [];
+  socket.on(EV.DOC_ERROR, (e: { code: string }) => errors.push(e.code));
+  await new Promise<void>((r) => socket.on("connect", () => r()));
+  const joined = new Promise<void>((r) => socket.once(EV.DOC_JOINED, () => r()));
+  socket.emit(EV.DOC_JOIN, { docId });
+  await Promise.race([joined, new Promise((r) => setTimeout(r, 1500))]);
+  return { socket, errors };
 }

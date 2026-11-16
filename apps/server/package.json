@@ -8,7 +8,8 @@
     "bench:latency": "tsx scripts/bench-latency.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "bench:compaction": "tsx scripts/bench-compaction.ts"
   },
   "dependencies": {
     "@collab/shared": "*",
@@ -18,7 +19,9 @@
     "express": "^4.21.0",
     "pg": "^8.13.0",
     "socket.io": "^4.8.0",
-    "yjs": "^13.6.20"
+    "yjs": "^13.6.20",
+    "y-protocols": "^1.0.6",
+    "lib0": "^0.2.99"
   },
   "devDependencies": {
     "@collab/sync": "*",

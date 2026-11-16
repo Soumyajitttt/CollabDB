@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import * as Y from "yjs";
 import { IndexeddbPersistence } from "y-indexeddb";
-import { SyncProvider, type SyncState } from "@collab/sync";
+import { SyncProvider, type PresenceEntry, type SyncState } from "@collab/sync";
 import { attachTabSync } from "./tabSync";
 import { CellValue, ColumnInfo, RowInfo, getCellValue, listColumns, listRows, rowsMap, seedIfEmpty } from "./doc";
 
@@ -72,6 +72,13 @@ export function useDoc(name: string | null, sync: SyncOptions | null = null) {
 
 const NO_SUBSCRIBE = () => () => {};
 const NO_STATE = () => null;
+const NO_PRESENCE: readonly PresenceEntry[] = [];
+const EMPTY_PRESENCE = () => NO_PRESENCE;
+
+/** Everyone else's cursor (empty for a local-only table). */
+export function usePresence(provider: SyncProvider | null): readonly PresenceEntry[] {
+  return useSyncExternalStore(provider ? provider.subscribePresence : NO_SUBSCRIBE, provider ? provider.getPresence : EMPTY_PRESENCE, EMPTY_PRESENCE);
+}
 
 /** Live connection state of a SyncProvider (null when the doc is local-only). */
 export function useSyncState(provider: SyncProvider | null): SyncState | null {

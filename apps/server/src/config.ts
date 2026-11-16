@@ -10,6 +10,10 @@ const Env = z.object({
   FLUSH_MS: z.coerce.number().int().min(0).default(20),
   /** A doc with no clients is dropped from memory after this long. */
   EVICT_AFTER_MS: z.coerce.number().int().min(0).default(60_000),
+  /** Write a snapshot and delete the folded-in update rows after this many rows ... */
+  COMPACT_EVERY_UPDATES: z.coerce.number().int().min(1).default(500),
+  /** ... or after this long, whichever comes first (only if there is something to fold). */
+  COMPACT_INTERVAL_MS: z.coerce.number().int().min(100).default(5 * 60_000),
   /** Per-socket token bucket. */
   SOCKET_RATE_BURST: z.coerce.number().int().min(1).default(120),
   SOCKET_RATE_PER_SEC: z.coerce.number().min(0.1).default(60),

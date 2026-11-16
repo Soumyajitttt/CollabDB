@@ -10,3 +10,10 @@ export const CreateDocBody = z.object({ name: z.string().trim().min(1).max(100) 
 
 export interface PublicUser { id: string; email: string; name: string }
 export interface DocSummary { id: string; name: string; role: "owner" | "editor" | "viewer"; createdAt: string }
+
+export const MemberRole = z.enum(["editor", "viewer"]);
+export const AddMemberBody = z.object({ email: Email, role: MemberRole });
+export const UpdateMemberBody = z.object({ role: MemberRole });
+export const DocIdParam = z.string().uuid();
+
+export interface MemberInfo { userId: string; email: string; name: string; role: "owner" | "editor" | "viewer" }

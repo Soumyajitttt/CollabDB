@@ -34,16 +34,22 @@ export async function startServer(config: Config, log: (m: string) => void = () 
     res.json({ ok: true });
   });
   app.use("/auth", authRouter(pool, config));
-  app.use("/docs", docsRouter(pool, config));
-  app.use(errorHandler);
 
   const http = createServer(app);
   const io = new Server(http, {
     cors: { origin: config.WEB_ORIGIN },
     maxHttpBufferSize: MAX_BUFFER_BYTES,
   });
-  const docManager = new DocManager(pool, { flushMs: config.FLUSH_MS, evictAfterMs: config.EVICT_AFTER_MS, log });
-  attachSocket(io, { pool, config, docManager });
+  const docManager = new DocManager(pool, {
+    flushMs: config.FLUSH_MS,
+    evictAfterMs: config.EVICT_AFTER_MS,
+    compactEvery: config.COMPACT_EVERY_UPDATES,
+    compactIntervalMs: config.COMPACT_INTERVAL_MS,
+    log,
+  });
+  const sockets = attachSocket(io, { pool, config, docManager });
+  app.use("/docs", docsRouter(pool, config, sockets.refreshMembership));
+  app.use(errorHandler);
 
   await new Promise<void>((resolve) => http.listen(config.PORT, resolve));
   const port = (http.address() as AddressInfo).port;

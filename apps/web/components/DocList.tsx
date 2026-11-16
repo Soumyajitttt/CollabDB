@@ -11,6 +11,7 @@ export function DocList() {
   const [docs, setDocs] = useState<DocSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
+  const [opening, setOpening] = useState<string | null>(null);
 
   useEffect(() => {
     listDocs().then(setDocs).catch(() => setError("Could not load your documents. Is the server running?"));
@@ -47,8 +48,19 @@ export function DocList() {
       <ul className="doclist">
         {docs?.map((d) => (
           <li key={d.id}>
-            <Link href={`/doc/${d.id}`}>{d.name}</Link>
-            <span className="pill">{d.role}</span>
+            {/* The whole card is the link, so a click anywhere on it opens the table. */}
+            <Link
+              href={`/doc/${d.id}`}
+              className="doccard"
+              aria-busy={opening === d.id}
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; // opening in a new tab
+                setOpening(d.id);
+              }}
+            >
+              <span className="doccard-name">{d.name}</span>
+              {opening === d.id ? <span className="muted small">Opening…</span> : <span className="pill">{d.role}</span>}
+            </Link>
           </li>
         ))}
       </ul>

@@ -32,6 +32,10 @@ Open http://localhost:3000, create an account, create a table. Open the same tab
 
 **Try offline merge:** in each window press **Go offline**, edit the same row in both, press **Go online**.
 
+**Try sharing and presence (Week 3):** register a second account, open a table you own, press **Share**, add that account's email as *Can edit* or *Can view*.
+Sign in as the second account in a private window: you will see each other's avatars and cursors, and a viewer's grid is read-only.
+Change the role or remove the person in the Share dialog while they are connected and watch it apply instantly.
+
 ## Auth design
 NextAuth keeps the browser session (JWT strategy, httpOnly cookie). Passwords are verified by the server with bcrypt.
 `GET /api/token` turns the session into a 10-minute JWT that the server verifies for REST and for the socket handshake.
@@ -43,5 +47,6 @@ NextAuth keeps the browser session (JWT strategy, httpOnly cookie). Passwords ar
 | `npm test` | all tests. DB tests skip (with a warning) if Postgres is down; `REQUIRE_DB=1` makes that a failure |
 | `npm run typecheck` | TypeScript across all packages |
 | `npm run bench:latency -w apps/server` | edit-to-remote and edit-to-ack latency (needs `apps/server/.env`) |
-| `npm run smoke -w apps/server` | full-stack check; start both servers first |
+| `npm run bench:compaction -w apps/server` | rows, bytes and load time before/after compaction of a 50,000-update session |
+| `npm run smoke -w apps/server` | full-stack check (sign-in, token, sync, sharing, presence); start both servers first |
 | `npm run migrate` | apply SQL migrations manually (the server also does this on start) |

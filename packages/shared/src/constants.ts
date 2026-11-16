@@ -5,6 +5,8 @@
  */
 export const MAX_UPDATE_BYTES = 4 * 1024 * 1024;
 export const MAX_STATE_VECTOR_BYTES = 64 * 1024;
+export const MAX_AWARENESS_BYTES = 2 * 1024;
+export const MAX_AWARENESS_ENTRIES = 4;
 export const MAX_BUFFER_BYTES = 5 * 1024 * 1024;
 
 export const TOKEN_ISSUER = "collab-db-web";

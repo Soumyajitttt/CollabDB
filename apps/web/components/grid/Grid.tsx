@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
 import { ColumnDef, createColumnHelper, getCoreRowModel, useReactTable } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useStructure } from "@/lib/useDoc";
+import type { SyncProvider } from "@collab/sync";
+import { usePresence, useStructure } from "@/lib/useDoc";
+import { byCell, cellKey } from "@/lib/presence";
 import {
   ColumnInfo, ColumnType, RowInfo, addColumn, appendRow, deleteColumn, deleteRow, insertRow,
   moveRowToIndex, renameColumn, setCell, setLongText,
@@ -19,8 +21,14 @@ const ADD_W = 56;
 const helper = createColumnHelper<RowInfo>();
 const TYPES: ColumnType[] = ["text", "longtext", "number", "checkbox", "select", "date"];
 
-export function Grid({ doc, onScrollFrame }: { doc: Y.Doc; onScrollFrame?: () => void }) {
+export function Grid({
+  doc, provider = null, readOnly = false, onScrollFrame,
+}: { doc: Y.Doc; provider?: SyncProvider | null; readOnly?: boolean; onScrollFrame?: () => void }) {
   const { rows, cols } = useStructure(doc);
+  const presence = usePresence(provider);
+  const remote = useMemo(() => byCell(presence), [presence]);
+  // Don't announce a cursor on row 1 before the person has touched the grid.
+  const [engaged, setEngaged] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
@@ -45,6 +53,13 @@ export function Grid({ doc, onScrollFrame }: { doc: Y.Doc; onScrollFrame?: () =>
     estimateSize: () => ROW_H,
     overscan: 8,
   });
+
+  useEffect(() => {
+    if (!provider) return;
+    const row = rows[active.r];
+    const col = cols[active.c];
+    provider.setPresence(engaged && row && col ? { rowId: row.id, colId: col.id } : null, engaged && editing && !readOnly);
+  }, [provider, rows, cols, active, editing, engaged, readOnly]);
 
   const width = GUTTER_W + cols.length * COL_W + ADD_W;
   const template = `${GUTTER_W}px repeat(${cols.length}, ${COL_W}px) ${ADD_W}px`;
@@ -74,6 +89,7 @@ export function Grid({ doc, onScrollFrame }: { doc: Y.Doc; onScrollFrame?: () =>
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (editing || e.metaKey || e.ctrlKey || e.altKey) return;
+    setEngaged(true);
     const col = cols[active.c];
     const row = rows[active.r];
     switch (e.key) {
@@ -83,7 +99,7 @@ export function Grid({ doc, onScrollFrame }: { doc: Y.Doc; onScrollFrame?: () =>
       case "ArrowLeft": e.preventDefault(); return moveTo(active.r, active.c - 1);
       case "Tab": e.preventDefault(); return moveTo(active.r, active.c + (e.shiftKey ? -1 : 1));
     }
-    if (!col || !row) return;
+    if (!col || !row || readOnly) return;
     if (e.key === "Enter" || e.key === "F2" || (e.key === " " && col.type === "checkbox")) {
       e.preventDefault();
       if (col.type === "checkbox") {
@@ -123,6 +139,8 @@ export function Grid({ doc, onScrollFrame }: { doc: Y.Doc; onScrollFrame?: () =>
           aria-colcount={cols.length}
           tabIndex={0}
           onKeyDown={onKeyDown}
+          onFocus={() => setEngaged(true)}
+          aria-readonly={readOnly || undefined}
           style={{ width, height: ROW_H + virtual.getTotalSize() }}
         >
           <div className="grid-head" role="row" style={{ gridTemplateColumns: template }}>
@@ -144,19 +162,19 @@ export function Grid({ doc, onScrollFrame }: { doc: Y.Doc; onScrollFrame?: () =>
                     />
                   ) : (
                     <>
-                      <span className="hname" onDoubleClick={() => setRenaming(col.id)} title="Double-click to rename">
+                      <span className="hname" onDoubleClick={readOnly ? undefined : () => setRenaming(col.id)} title={readOnly ? undefined : "Double-click to rename"}>
                         {col.name}
                       </span>
                       <span className="htype">{col.type}</span>
-                      <button className="icon-btn" aria-label={`Delete column ${col.name}`} onClick={() => deleteColumn(doc, col.id)}>×</button>
+                      {!readOnly && <button className="icon-btn" aria-label={`Delete column ${col.name}`} onClick={() => deleteColumn(doc, col.id)}>×</button>}
                     </>
                   )}
                 </div>
               );
             })}
             <div className="hcell add">
-              <button className="icon-btn always" aria-label="Add column" onClick={() => setAdding((a) => !a)}>+</button>
-              {adding && (
+              {!readOnly && <button className="icon-btn always" aria-label="Add column" onClick={() => setAdding((a) => !a)}>+</button>}
+              {adding && !readOnly && (
                 <div className="popover" onKeyDown={(e) => e.key === "Escape" && setAdding(false)}>
                   <div
                     role="group"
@@ -209,28 +227,35 @@ export function Grid({ doc, onScrollFrame }: { doc: Y.Doc; onScrollFrame?: () =>
               >
                 <div
                   className="gutter"
-                  draggable
+                  draggable={!readOnly}
                   onDragStart={(e) => { setDragId(rowId); e.dataTransfer.effectAllowed = "move"; }}
                   onDragEnd={() => { setDragId(null); setDropIdx(null); }}
-                  title="Drag to reorder"
+                  title={readOnly ? undefined : "Drag to reorder"}
                 >
                   <span className="rownum">{v.index + 1}</span>
-                  <button className="icon-btn" aria-label={`Delete row ${v.index + 1}`} onClick={() => deleteRow(doc, rowId)}>×</button>
+                  {!readOnly && <button className="icon-btn" aria-label={`Delete row ${v.index + 1}`} onClick={() => deleteRow(doc, rowId)}>×</button>}
                 </div>
-                {cols.map((col, ci) => (
-                  <Cell
-                    key={col.id}
-                    doc={doc}
-                    rowId={rowId}
-                    col={col}
-                    active={active.r === v.index && active.c === ci}
-                    editing={editing && active.r === v.index && active.c === ci}
-                    seed={seed}
-                    onSelect={() => { setActive({ r: v.index, c: ci }); if (editing) setEditing(false); }}
-                    onStartEdit={() => { setSeed(null); setEditing(true); }}
-                    onEnd={endEdit}
-                  />
-                ))}
+                {cols.map((col, ci) => {
+                  const who = remote.get(cellKey(rowId, col.id));
+                  return (
+                    <Cell
+                      key={col.id}
+                      doc={doc}
+                      rowId={rowId}
+                      col={col}
+                      active={active.r === v.index && active.c === ci}
+                      editing={editing && active.r === v.index && active.c === ci}
+                      seed={seed}
+                      readOnly={readOnly}
+                      remoteName={who?.user.name}
+                      remoteColor={who?.user.color}
+                      remoteEditing={who?.editing}
+                      onSelect={() => { setEngaged(true); setActive({ r: v.index, c: ci }); if (editing) setEditing(false); }}
+                      onStartEdit={() => { setSeed(null); setEditing(true); }}
+                      onEnd={endEdit}
+                    />
+                  );
+                })}
                 <div />
               </div>
             );
@@ -238,13 +263,13 @@ export function Grid({ doc, onScrollFrame }: { doc: Y.Doc; onScrollFrame?: () =>
         </div>
       </div>
       <div className="grid-foot">
-        <button className="btn" onClick={() => { appendRow(doc); setTimeout(() => moveTo(rows.length, active.c), 0); }}>Add row</button>
+        <button className="btn" disabled={readOnly} onClick={() => { appendRow(doc); setTimeout(() => moveTo(rows.length, active.c), 0); }}>Add row</button>
         <button
           className="btn"
-          disabled={!rows[active.r]}
+          disabled={readOnly || !rows[active.r]}
           onClick={() => { const r = rows[active.r]; if (r) insertRow(doc, r.order, rows[active.r + 1]?.order ?? null); }}
         >Insert below</button>
-        <span className="hint">Arrows move · Enter edits · Tab next cell · Esc cancels · Delete clears</span>
+        <span className="hint">{readOnly ? "View only: arrows move your cursor" : "Arrows move · Enter edits · Tab next cell · Esc cancels · Delete clears"}</span>
       </div>
     </div>
   );
